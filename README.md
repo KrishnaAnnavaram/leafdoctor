@@ -9,7 +9,7 @@
 ![Classes](https://img.shields.io/badge/Canonical_classes-38-1F3864?style=for-the-badge)
 ![Feature sets](https://img.shields.io/badge/Feature_sets-CNN_%2B_HSV_%2B_GLCM_%2B_LBP-2E5FD9?style=for-the-badge)
 ![CLI commands](https://img.shields.io/badge/CLI_commands-10-6E86E8?style=for-the-badge)
-![Tests](https://img.shields.io/badge/Tests-54_passing-3DA35B?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-53_passing-3DA35B?style=for-the-badge)
 ![Offline demo](https://img.shields.io/badge/Offline_demo-Yes-F5C542?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-A0399B?style=for-the-badge)
 
@@ -106,7 +106,7 @@ leafdoctor gives each of these questions its own component. Each component has a
 | Classifiers | `majority` (baseline), `logreg`, `rf`, `hgb`, `xgb` (optional), and a fine-tuned CNN baseline (optional) |
 | Offline mode | Synthetic leaves, `handcrafted` and `pixelproj` features, JSON run files. No key, no download and no network |
 | Safety | `check_leakage` stops the split if a leaf group or a near-duplicate image is in two splits |
-| Tests | **54** unit tests (`pytest`): 54 pass locally with PyTorch, 53 pass and 4 skip in CI |
+| Tests | **53** pass in CI (`.[dev]` only) and 4 skip (extras). With PyTorch, 54 pass and 3 skip |
 
 ```mermaid
 flowchart LR
@@ -473,8 +473,7 @@ Planned milestones (not built):
 
 | Validation | Result | Command |
 |---|---|---|
-| Unit tests (local, with PyTorch) | **54 passed, 3 skipped** (MLflow, torchvision, XGBoost not installed) | `pytest -q` |
-| Unit tests (CI simulation, clean venv, `.[dev]` only) | **53 passed, 4 skipped** | `pip install -e ".[dev]"`, `pytest -q` |
+| Unit tests | CI installs only `.[dev]`: **53 passed**, 4 skipped (`cnn`, `xgb` and `mlflow` extras). With PyTorch: 54 passed, 3 skipped (torchvision, XGBoost, MLflow) | `pip install -e ".[dev]"`, `pytest -q` |
 | Leakage on the synthetic set, image-level split | 60 leaf groups shared by train and val. Val macro-F1 **1.000** | `leafdoctor demo` |
 | Leakage on the synthetic set, group split | 0 shared groups. Val macro-F1 **0.908** | `leafdoctor demo` |
 | Ablation on synthetic lab test (69 images) | `pixelproj` 0.354, `handcrafted` 0.868, both **0.883** macro-F1 | `leafdoctor demo` |
