@@ -1,0 +1,8 @@
+# Real hybrid run: frozen EfficientNet-B3 features + handcrafted features (needs the extra "cnn").
+name = "hybrid-effb3"
+extractor = "torch:efficientnet_b3+handcrafted"
+classifiers = ["majority", "logreg", "rf", "hgb"]
+imbalance = "balanced"
+train_views = 1
+seed = 42
+image_size = 256
