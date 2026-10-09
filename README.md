@@ -69,6 +69,7 @@ This README is the **one location that explains all of leafdoctor**. It gives th
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one experiment](#42-the-life-cycle-of-one-experiment)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [The data layer: manifests and the group split](#5-the-data-layer-manifests-and-the-group-split)
 6. 🟢 [The feature layer: extractors and the cache](#6-the-feature-layer-extractors-and-the-cache)
 7. 🟣 [The model layer: classifiers, protocol and tracking](#7-the-model-layer-classifiers-protocol-and-tracking)
@@ -139,6 +140,58 @@ flowchart LR
 | Inference | `src/leafdoctor/predict.py` | Batch prediction with a saved model bundle |
 | CLI | `src/leafdoctor/cli.py` | The `leafdoctor` command with 10 subcommands |
 
+The component map shows which module calls which module. An arrow points from the caller to the module that it uses.
+
+```mermaid
+flowchart TB
+    CLI["cli.py<br/>leafdoctor command"]
+    CFG["config.py<br/>Settings"]
+    subgraph DATA["Data layer"]
+        SYN["synthetic.py<br/>generate_dataset"]
+        MAN["manifest.py<br/>scan_folder, write_manifest"]
+        SPL["split.py<br/>merge_groups, group_split, check_leakage"]
+        CLS["classes.py<br/>canonical_label"]
+        IMG["images.py<br/>load_image, canonical_hash"]
+    end
+    subgraph FEAT["Feature layer"]
+        ST["features/store.py<br/>FeatureStore"]
+        BB["features/backbones.py<br/>build_extractor"]
+        HC["features/handcrafted.py<br/>HandcraftedExtractor"]
+        AUG["augment.py<br/>augment, view_rng"]
+    end
+    subgraph MODEL["Model layer"]
+        EXP["experiment.py<br/>run_experiment, select_on_val"]
+        MOD["models.py<br/>fit_classifier, TrainedModel"]
+        MET["metrics.py<br/>evaluate"]
+        TRK["tracking.py<br/>build_tracker"]
+        FT["finetune.py<br/>finetune, extra cnn"]
+        PR["predict.py<br/>predict_paths"]
+    end
+
+    CLI --> CFG
+    CLI --> SYN
+    CLI --> MAN
+    CLI --> SPL
+    CLI --> EXP
+    CLI --> TRK
+    CLI --> FT
+    CLI --> PR
+    MAN --> CLS
+    MAN --> IMG
+    EXP --> BB
+    EXP --> ST
+    EXP --> MOD
+    EXP --> MET
+    EXP --> SPL
+    ST --> AUG
+    ST --> IMG
+    BB --> HC
+    TRK --> MET
+    PR --> BB
+    PR --> MOD
+    FT --> AUG
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -181,6 +234,21 @@ Each image gets a leaf group id from its file name. `merge_groups` also joins im
 ### 3.2 The test set is scored once, after the selection
 `select_on_val` receives only the train and val features. `run_experiment` computes the test features after the selection is final. A test asserts that the test images never enter the selection and that the code scores test once.
 
+```mermaid
+flowchart LR
+    TR[/"train rows"/] --> F1["train features<br/>+ train_views"]
+    VA[/"val rows"/] --> F2["val features"]
+    F1 --> SEL["select_on_val<br/>fit each candidate, val macro-F1"]
+    F2 --> SEL
+    SEL --> FIX["Selected model,<br/>selection is final"]
+    TE[/"test rows"/] --> F3["test features,<br/>computed only now"]
+    FIX --> S1["Score test once"]
+    F3 --> S1
+    FD[/"field rows, known classes"/] --> F4["field features"]
+    FIX --> S2["Score field set"]
+    F4 --> S2
+```
+
 ### 3.3 The augmented copy helps train only
 `attach_augmented` adds offline-augmented images to train only. It drops each copy whose leaf group or hash belongs to val or test. Train-time augmentation in `augment.py` changes train images only.
 
@@ -203,25 +271,56 @@ The core package needs only NumPy, scikit-learn and Pillow. `torch`, `torchvisio
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    PV["PlantVillage folders"] --> MAN["leafdoctor manifest"]
-    AUG["Augmented copy folders (optional)"] --> MAN2["leafdoctor manifest"]
-    FLD["Field folders (optional)"] --> MAN3["leafdoctor manifest"]
+flowchart TD
+    PV[/"PlantVillage folders"/] --> MAN["leafdoctor manifest"]
+    AUG[/"Augmented copy folders (optional)"/] --> MAN2["leafdoctor manifest"]
+    FLD[/"Field folders (optional)"/] --> MAN3["leafdoctor manifest"]
     MAN --> MERGE["merge_groups: leaf ids and near hashes"]
     MERGE --> SPLIT["group_split: train, val, test"]
     MAN2 --> ATT["attach_augmented: train only"]
     SPLIT --> ATT
     ATT --> CHK{"check_leakage"}
-    CHK -- "leak" --> STOP["LeakageError"]
-    CHK -- "clean" --> FEAT["FeatureStore: batched, cached"]
+    CHK -- "leak" --> STOP[/"LeakageError"/]
+    CHK -- "clean" --> SPL[("artifacts/splits<br/>train.csv, val.csv, test.csv")]
+    SPL --> FEAT["FeatureStore: batched, cached"]
+    FEAT --> CACHE[("artifacts/features<br/>.npz cache")]
     FEAT --> SEL["select_on_val: candidates, best val macro-F1"]
     SEL --> TEST["Score test once"]
     MAN3 --> FIELD["Score field set"]
+    SEL --> FIELD
     TEST --> TRK["Tracker: params, reports, model alias"]
     FIELD --> TRK
+    TRK --> RUNS[("artifacts/runs and models<br/>run JSON, .joblib bundle")]
+    RUNS --> PRED["leafdoctor predict"]
+    PRED --> OUT[/"Label, confidence, top 3"/]
+    OUT --> HUMAN{{"HUMAN<br/>an expert examines the plant<br/>before a treatment decision"}}
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUMAN human
 ```
 
 ### 4.2 The life cycle of one experiment
+
+```mermaid
+stateDiagram-v2
+    state "Config validated" as Valid
+    state "Train and val features" as Features
+    state "Model selected" as Selected
+    state "Test scored" as Tested
+    state "Field scored" as Fielded
+    state "Run logged" as Logged
+    state "Model saved" as Saved
+    [*] --> Valid: ExperimentConfig.validate
+    Valid --> Features: build_extractor, FeatureStore.features
+    Features --> Selected: select_on_val
+    Selected --> Tested: test features, evaluate once
+    Tested --> Fielded: field manifest given
+    Tested --> Logged: no field manifest
+    Fielded --> Logged: start_run, log_params, log_eval
+    Logged --> Saved: TrainedModel.save, log_model champion
+    Logged --> [*]: no models folder, end_run
+    Saved --> [*]: end_run
+```
 
 1. `leafdoctor manifest` scans each class folder and writes one validated row for each image.
 2. `leafdoctor split` joins near-duplicates, splits by leaf group and writes `train.csv`, `val.csv` and `test.csv`.
@@ -232,11 +331,63 @@ flowchart TB
 7. The selected model scores the test split once, then the field set.
 8. The tracker writes the parameters, the reports and the model path with the alias `champion`.
 
+### 4.3 Who does which step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor R as Researcher
+    participant CLI as leafdoctor CLI
+    participant MAN as manifest.py
+    participant SPL as split.py
+    participant EXP as experiment.py
+    participant FS as FeatureStore
+    participant TRK as Tracker
+    participant DISK as artifacts folder
+
+    R->>CLI: leafdoctor manifest root --source --out
+    CLI->>MAN: scan_folder, then write_manifest
+    MAN-->>DISK: manifest.csv
+    R->>CLI: leafdoctor split manifest.csv
+    CLI->>SPL: merge_groups, group_split, attach_augmented
+    CLI->>SPL: check_leakage
+    SPL-->>CLI: report, or LeakageError
+    CLI->>DISK: write_splits: train, val, test, split_report.json
+    R->>CLI: leafdoctor train --config --field
+    CLI->>EXP: run_experiment(cfg, splits, store, tracker)
+    EXP->>FS: features for train and val
+    FS-->>EXP: FeatureSet, from cache or extracted
+    EXP->>EXP: select_on_val
+    EXP->>FS: features for test, then field
+    EXP->>EXP: evaluate test once, then field
+    EXP->>TRK: start_run, log_params, log_eval
+    EXP->>DISK: TrainedModel.save .joblib
+    EXP->>TRK: log_model with alias champion, end_run
+    TRK-->>DISK: runs/experiment/run_id.json
+    CLI-->>R: summary JSON with the model path
+```
+
 ---
 
 ## 5. The data layer: manifests and the group split
 
 **Purpose.** Change image folders into validated, leakage-free split manifests without a copy of any image.
+
+```mermaid
+flowchart TD
+    ROOT[/"root/class folder/image"/] --> EX{"Root folder exists?"}
+    EX -- "no" --> ME[/"ManifestError"/]
+    EX -- "yes" --> CL{"canonical_label<br/>maps the folder name?"}
+    CL -- "no" --> UNK["Add to unknown_folders,<br/>skip the folder"]
+    CL -- "yes" --> SUF{"Image suffix<br/>jpg, jpeg, png, bmp?"}
+    SUF -- "no" --> SKIP["Skip the file"]
+    SUF -- "yes" --> LD{"load_image OK?"}
+    LD -- "no" --> COR["Add to corrupt"]
+    LD -- "yes" --> GR["Count grayscale,<br/>canonical_hash unless --no-hash"]
+    GR --> ROW["Row: path, label, source,<br/>source:group_id_from_name, phash"]
+    ROW --> WM["write_manifest:<br/>temporary file, then os.replace"]
+    WM --> OUT[("manifest.csv")]
+```
 
 | Input | Output |
 |---|---|
@@ -260,11 +411,45 @@ flowchart TB
 - The near-duplicate search uses `max-distance + 1` hash bands. Two hashes within the distance share at least one band, so the search is not quadratic.
 - `random_image_split` exists only for the leakage comparison. No command trains a model on it.
 
+`leafdoctor split` runs these steps:
+
+```mermaid
+flowchart TD
+    M[/"manifest.csv"/] --> RM["read_manifest:<br/>columns and validate_rows"]
+    RM --> UF["merge_groups: union-find on group_id,<br/>then near-duplicate pairs from hash bands"]
+    UF --> GS["group_split: groups by majority label,<br/>seeded shuffle, largest deficit wins"]
+    AM[/"--augmented manifest"/] --> AT{"Copy in a val or test group,<br/>or a near hash?"}
+    GS --> AT
+    AT -- "yes" --> DROP["Drop, count dropped_augmented"]
+    AT -- "no" --> KEEP["Add to train"]
+    KEEP --> CK{"check_leakage:<br/>shared groups or cross-split pairs?"}
+    DROP --> CK
+    GS -- "no augmented manifest" --> CK
+    CK -- "yes" --> LE[/"LeakageError, exit code 2,<br/>no split file written"/]
+    CK -- "no" --> WS["write_splits"]
+    WS --> OUT[("splits/train.csv, val.csv, test.csv,<br/>split_report.json")]
+```
+
 ---
 
 ## 6. The feature layer: extractors and the cache
 
 **Purpose.** Change images into feature matrices once, in batches, and keep them on disk.
+
+```mermaid
+flowchart TD
+    IN[/"Rows, extractor, split name,<br/>image size, train_views, seed"/] --> KEY["cache_key: rows, file size and time,<br/>extractor name, size, views, seed"]
+    KEY --> HIT{"Cache folder set and<br/>.npz file exists?"}
+    HIT -- "yes" --> READ["np.load, allow_pickle False<br/>no image is opened"]
+    HIT -- "no" --> BATCH["Load BATCH_SIZE images"]
+    BATCH --> VIEWS["Add train_views augmented copies,<br/>view_rng per image and view"]
+    VIEWS --> EXT["extractor.extract<br/>in batches"]
+    EXT --> MORE{"More rows?"}
+    MORE -- "yes" --> BATCH
+    MORE -- "no" --> SAVE["Write a temporary .npz,<br/>then rename"]
+    READ --> OUT[/"FeatureSet: X, labels, paths, groups"/]
+    SAVE --> OUT
+```
 
 | Input | Output |
 |---|---|
@@ -287,6 +472,23 @@ flowchart TB
 | GLCM | 36 | 32 grey levels, distances 1, 2 and 4, angles 0, 45, 90 and 135. Contrast, dissimilarity, homogeneity, energy, correlation and ASM. Mean and range over the angles |
 | LBP | 10 | 8 neighbours at radius 1, rotation-invariant uniform codes, sum 1 |
 
+`build_extractor` changes a spec into one extractor:
+
+```mermaid
+flowchart LR
+    SPEC[/"Spec, for example<br/>torch:efficientnet_b3+handcrafted"/] --> SPLIT["Split at +"]
+    SPLIT --> P{"Each part"}
+    P -- "handcrafted" --> HC["HandcraftedExtractor<br/>HSV 512 + GLCM 36 + LBP 10"]
+    P -- "pixelproj" --> PP["PixelProjection<br/>seeded, 128 values"]
+    P -- "torch:arch" --> TB["TorchBackbone<br/>frozen, head removed"]
+    P -- "other" --> ERR[/"ValueError"/]
+    HC --> N{"More than<br/>one part?"}
+    PP --> N
+    TB --> N
+    N -- "yes" --> FU[/"Fusion: concatenated outputs"/]
+    N -- "no" --> ONE[/"The one extractor"/]
+```
+
 **The deep extractors**
 
 | Spec | Dimension | Needs |
@@ -303,6 +505,23 @@ flowchart TB
 
 **Purpose.** Select one classifier on val, score it once on test and on the field set, and record the run.
 
+```mermaid
+flowchart TD
+    IN[/"Train and val FeatureSets,<br/>cfg.classifiers"/] --> C["Next candidate:<br/>majority, logreg, rf, hgb or xgb"]
+    C --> FIT["fit_classifier: LabelEncoder,<br/>StandardScaler + classifier,<br/>balanced sample weights"]
+    FIT --> EV["evaluate on val:<br/>align_proba, macro-F1"]
+    EV --> B{"Macro-F1 higher<br/>than the best?"}
+    B -- "yes" --> KEEP["Keep as the best"]
+    B -- "no" --> MORE{"More candidates?"}
+    KEEP --> MORE
+    MORE -- "yes" --> C
+    MORE -- "no" --> TEST["Test features, evaluate test once"]
+    TEST --> FLD{"Field manifest given?"}
+    FLD -- "yes" --> FS["Field rows with a known class,<br/>evaluate field"]
+    FLD -- "no" --> REP[/"RunResult: selected, val scores,<br/>reports, model path"/]
+    FS --> REP
+```
+
 | Input | Output |
 |---|---|
 | Train, val and test feature sets, an `ExperimentConfig` | `RunResult`, `<name>-<run_id>.joblib`, `runs/<experiment>/<run_id>.json` |
@@ -317,9 +536,64 @@ flowchart TB
 6. `TrainedModel.save` writes the pipeline, the classes, the extractor spec and the image size.
 7. The tracker records the model with the alias `leafdoctor-classifier@champion`.
 
+```mermaid
+flowchart LR
+    K{"LEAFDOCTOR_TRACKER"} -- "json" --> J["JsonTracker"]
+    K -- "mlflow" --> M["MlflowTracker"]
+    K -- "none" --> N["NullTracker<br/>checks only"]
+    P[/"7 parameters"/] --> CP{"Key in PARAM_KEYS?"}
+    CP -- "no" --> TE[/"TrackingError"/]
+    R[/"EvalReport"/] --> CM{"Split in val, test, field<br/>and headline values finite?"}
+    CM -- "no" --> TE
+    CP -- "yes" --> J
+    CM -- "yes" --> J
+    CP -- "yes" --> M
+    CM -- "yes" --> M
+    J --> JF[("runs/experiment/run_id.json<br/>alias leafdoctor-classifier@champion")]
+    M --> MF[("MLflow run, registered model,<br/>alias champion")]
+```
+
 **The ablation.** `leafdoctor ablate` runs three experiments that differ only by the feature set: CNN only, handcrafted only, and both. Use it to test the claim that the hybrid features help.
 
+```mermaid
+flowchart LR
+    BASE[/"Base ExperimentConfig<br/>+ --cnn spec, default pixelproj"/] --> A1["name-cnn<br/>extractor = cnn spec"]
+    BASE --> A2["name-handcrafted<br/>extractor = handcrafted"]
+    BASE --> A3["name-cnn-handcrafted<br/>extractor = cnn spec+handcrafted"]
+    A1 --> RUN["run_experiment for each,<br/>same splits, classifiers and seed"]
+    A2 --> RUN
+    A3 --> RUN
+    RUN --> OUT[/"3 tracked runs,<br/>test and field macro-F1 with intervals"/]
+```
+
 **The CNN baseline.** `leafdoctor finetune` trains a CNN end to end with class-weighted cross-entropy and train-time augmentation. `--arch tiny` is a 3-block CNN that needs only PyTorch. Any torchvision arch in section 6 fine-tunes an ImageNet model.
+
+```mermaid
+flowchart TD
+    SP[/"splits/train.csv"/] --> LD["Load train images,<br/>image size --size"]
+    LD --> W["Class weights:<br/>n / (k x class count)"]
+    LD --> A{"--arch"}
+    A -- "tiny" --> T["_tiny_cnn: 3 conv blocks"]
+    A -- "torchvision arch" --> PT["_pretrained: ImageNet weights,<br/>new last layer"]
+    T --> TR["Epochs: seeded order, augment each batch,<br/>AdamW, weighted cross-entropy"]
+    PT --> TR
+    W --> TR
+    TR --> FT["FineTuned model"]
+    FT --> EV[/"evaluate val and test:<br/>headline metrics"/]
+```
+
+**Inference.** `leafdoctor predict` classifies image files with a saved model bundle:
+
+```mermaid
+flowchart LR
+    B[/".joblib bundle"/] --> L["TrainedModel.load<br/>pickle: own files only"]
+    L --> X["build_extractor<br/>bundle extractor spec and seed"]
+    IMGS[/"Image paths"/] --> BT["Batches of BATCH_SIZE,<br/>load_image at bundle image size"]
+    X --> FE["extract"]
+    BT --> FE
+    FE --> PP["predict_proba"]
+    PP --> OUT[/"path, label, confidence, top 3"/]
+```
 
 ---
 
@@ -334,6 +608,19 @@ flowchart TB
 | Leakage stop | `shared_groups > 0` or `cross_split_near_duplicates > 0` | `check_leakage` |
 | Augmented copy of a val or test leaf | Dropped, counted in `dropped_augmented` | `attach_augmented` |
 | Class without an image in a split | Written to `notes` in `split_report.json` | `group_split` |
+
+```mermaid
+flowchart TD
+    S[/"train, val, test rows"/] --> G["Record the first split of each group_id"]
+    G --> SG["shared_groups: groups in<br/>more than one split"]
+    S --> H["Hashed rows of all splits"]
+    H --> NP["near_duplicate_pairs:<br/>max-distance + 1 bands, Hamming at most max-distance"]
+    NP --> CX["cross_split_near_duplicates:<br/>pairs from two splits"]
+    SG --> D{"shared_groups above 0, or<br/>cross_split_near_duplicates above 0?"}
+    CX --> D
+    D -- "yes" --> LE[/"LeakageError"/]
+    D -- "no" --> OK[/"Leakage report with two zeros"/]
+```
 
 **Selection and metrics**
 
@@ -404,6 +691,22 @@ Offline demo (no download, about 25 seconds on a laptop CPU):
 leafdoctor demo --out artifacts/demo
 ```
 
+`leafdoctor demo` runs these steps in this order:
+
+```mermaid
+flowchart TD
+    G1["generate_dataset lab:<br/>6 classes, healthy x3, 3 views, 64 px"] --> SC["scan_folder, merge_groups<br/>max-distance 3"]
+    G2["generate_dataset field:<br/>1 view, seed + 1"] --> SF["scan_folder field"]
+    SC --> MF[("manifest_lab.csv,<br/>manifest_field.csv")]
+    SF --> MF
+    SC --> GS["group_split, check_leakage,<br/>write_splits"]
+    GS --> AB["ablation_configs: majority, logreg, rf<br/>3 run_experiment calls with the field rows"]
+    SF --> AB
+    SC --> LK["leakage_comparison:<br/>image-level against group split, rf"]
+    AB --> SUM[/"demo_summary.json"/]
+    LK --> SUM
+```
+
 Step by step on synthetic images:
 
 ```bash
@@ -444,7 +747,7 @@ leafdoctor ablate --config configs/hybrid_efficientnet.toml --cnn torch:efficien
 | `LEAFDOCTOR_DEVICE` | Torch extractors, finetune | `cpu` (default) or a torch device such as `cuda` |
 | `MLFLOW_TRACKING_URI` | MLflow tracker | Tracking URI. Empty: the MLflow default |
 
-A bad value (for example a seed that is not an integer) stops the command with `error:`.
+A bad value (for example a seed that is not an integer) stops the command with a `ConfigError` that names the variable.
 Credentials are only in a local `.env` file. Git ignores this file. Do not print or commit credentials.
 
 ---
